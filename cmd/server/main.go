@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -38,7 +39,6 @@ func main() {
 }
 
 func checkHealth(w http.ResponseWriter, r *http.Request) {
-	// w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("ok"))
 	w.WriteHeader(http.StatusOK)
 }
@@ -52,6 +52,14 @@ func echoMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contentType := r.Header.Get("Content-Type")
+	w.Header().Set("Content-Type", contentType)
+
+	if contentType == "application/json" && !json.Valid(bodyBytes) {
+		w.WriteHeader(http.StatusBadRequest)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
 	w.Write(bodyBytes)
-	w.WriteHeader(http.StatusOK)
 }
