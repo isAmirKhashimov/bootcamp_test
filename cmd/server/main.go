@@ -6,6 +6,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ func main() {
 	// запускайте из корня модуля: go run ./cmd/server
 	mux.Handle("/", http.FileServer(http.Dir("frontend")))
 	mux.HandleFunc("GET /health", checkHealth)
+	mux.HandleFunc("POST /echo", echoMessage)
 
 	// TODO Этап 1: GET /health           -> 200, тело "ok"
 	// TODO Этап 2: POST /echo            -> тело запроса без изменений
@@ -38,5 +40,18 @@ func main() {
 func checkHealth(w http.ResponseWriter, r *http.Request) {
 	// w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte("ok"))
+	w.WriteHeader(http.StatusOK)
+}
+
+func echoMessage(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Ошибка чтения тела запроса", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(bodyBytes)
 	w.WriteHeader(http.StatusOK)
 }
