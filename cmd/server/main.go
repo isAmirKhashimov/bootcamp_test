@@ -22,6 +22,7 @@ func main() {
 	// Панель из frontend/. Каталог берётся относительно рабочего, поэтому
 	// запускайте из корня модуля: go run ./cmd/server
 	mux.Handle("/", http.FileServer(http.Dir("frontend")))
+	mux.HandleFunc("GET /health", checkHealth)
 
 	// TODO Этап 1: GET /health           -> 200, тело "ok"
 	// TODO Этап 2: POST /echo            -> тело запроса без изменений
@@ -32,4 +33,10 @@ func main() {
 
 	log.Printf("сервер слушает http://localhost:%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
+}
+
+func checkHealth(w http.ResponseWriter, r *http.Request) {
+	// w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte("ok"))
+	w.WriteHeader(http.StatusOK)
 }

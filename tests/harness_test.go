@@ -37,7 +37,7 @@ func run(m *testing.M) int {
 	}
 	defer os.RemoveAll(tmp)
 
-	bin := filepath.Join(tmp, "server")
+	bin := filepath.Join(tmp, "server.exe")
 	build := exec.Command("go", "build", "-o", bin, "./cmd/server")
 	build.Dir = moduleRoot
 	if out, err := build.CombinedOutput(); err != nil {
