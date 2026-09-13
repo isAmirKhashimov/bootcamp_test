@@ -6,12 +6,24 @@
 package main
 
 import (
+	"container/list"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 )
+
+var messages = list.New()
+var processMessage = getMessageProceessor()
+
+type Message struct {
+	Id        int    `json:"id"`
+	Content   string `json:"message"`
+	CreatedAt string `json:"created_at"`
+}
 
 func main() {
 	port := os.Getenv("PORT")
@@ -26,6 +38,7 @@ func main() {
 	mux.Handle("/", http.FileServer(http.Dir("frontend")))
 	mux.HandleFunc("GET /health", checkHealth)
 	mux.HandleFunc("POST /echo", echoMessage)
+	mux.HandleFunc("POST /messages", sendMessage)
 
 	// TODO Этап 1: GET /health           -> 200, тело "ok"
 	// TODO Этап 2: POST /echo            -> тело запроса без изменений
@@ -40,7 +53,6 @@ func main() {
 
 func checkHealth(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
-	w.WriteHeader(http.StatusOK)
 }
 
 func echoMessage(w http.ResponseWriter, r *http.Request) {
@@ -48,7 +60,7 @@ func echoMessage(w http.ResponseWriter, r *http.Request) {
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Ошибка чтения тела запроса", http.StatusInternalServerError)
+		http.Error(w, "Failed to load the request body", http.StatusInternalServerError)
 		return
 	}
 
@@ -56,10 +68,66 @@ func echoMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 
 	if contentType == "application/json" && !json.Valid(bodyBytes) {
-		w.WriteHeader(http.StatusBadRequest)
+		http.Error(w, "Content is not valid", http.StatusBadRequest)
+		return
 	} else {
 		w.WriteHeader(http.StatusOK)
+		w.Write(bodyBytes)
+	}
+}
+
+func sendMessage(w http.ResponseWriter, r *http.Request) {
+
+	var data map[string]string
+
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
 	}
 
-	w.Write(bodyBytes)
+	defer r.Body.Close()
+
+	requestMessage, exists := data["message"]
+	if !exists || requestMessage == "" {
+		http.Error(w, "'message' should not be empty", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	responseMessage, err := processMessage(requestMessage)
+	if err != nil {
+		http.Error(w, "Cannot process message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+
+	if err := json.NewEncoder(w).Encode(responseMessage); err != nil {
+		http.Error(w, "Cannot serialize message: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func getMessageProceessor() func(string) (Message, error) {
+	currentId := 0
+	var mu sync.Mutex
+
+	return func(messageText string) (Message, error) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		currentId++
+		now := time.Now().UTC()
+		formattedTime := now.Format(time.RFC3339)
+		message := Message{
+			Id:        currentId,
+			Content:   messageText,
+			CreatedAt: formattedTime,
+		}
+
+		messages.PushFront(message)
+
+		return message, nil
+	}
 }
