@@ -6,11 +6,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"slices"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -43,6 +46,7 @@ func main() {
 	mux.HandleFunc("POST /echo", echoMessage)
 	mux.HandleFunc("POST /messages", sendMessage)
 	mux.HandleFunc("GET /messages", getMessages)
+	mux.HandleFunc("DELETE /messages/{id}", deleteMessage)
 
 	// TODO Этап 1: GET /health           -> 200, тело "ok"
 	// TODO Этап 2: POST /echo            -> тело запроса без изменений
@@ -142,7 +146,56 @@ func getMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer log.Printf("[GET /messages] Successfully serialized messages. Messages count: %v", len(messages))
+	log.Printf("[GET /messages] Successfully serialized messages. Messages count: %v", len(messages))
+}
+
+func deleteMessage(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+
+	log.Printf("[DELETE /messages/%v] Getting messages started", idStr)
+	defer log.Printf("[GET /messages/%v] Getting messages completed", idStr)
+
+	w.Header().Set("Content-Type", "application/json")
+
+	num, err := strconv.Atoi(idStr)
+	if err != nil {
+		log.Printf("[DELETE /messages/%v] Cannot convert id = %v to integer. Return 500", err.Error())
+		http.Error(w, "Cannot convert id = \""+idStr+"\" to integer: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !tryDeleteMessageById(num) {
+		log.Printf("[DELETE /messages/%v] Target message does not exist. Return 404", idStr)
+		http.Error(w, "[DELETE /messages/"+idStr+"] Target message does not exist", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("[DELETE /messages/%v] Message deleted successully. Return 204", idStr)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func tryDeleteMessageById(id int) bool {
+	messagesMu.Lock()
+	defer messagesMu.Unlock()
+
+	log.Printf("[tryDeleteMessageById] Message deletion started")
+	defer log.Printf("[tryDeleteMessageById] Message deletion completed")
+
+	targetIdx, found := slices.BinarySearchFunc(messages, id, func(msg Message, targetId int) int {
+		return cmp.Compare(msg.Id, targetId)
+	})
+
+	if !found {
+		log.Printf("[tryDeleteMessageById] Message was not found")
+		return false
+	}
+
+	// Here it'd be better to have map or lazy deletion instead of slice.
+	log.Printf("[tryDeleteMessageById] Message was found by index %v", targetIdx)
+	copy(messages[targetIdx:], messages[targetIdx+1:])
+	messages = messages[:len(messages)-1]
+
+	return true
 }
 
 func getMessagesReverse() []Message {
@@ -166,6 +219,7 @@ func getMessagesReverse() []Message {
 	return result
 }
 
+// TODO: To transform into interface with methods
 func getMessageProceessor() func(string) (Message, error) {
 	currentId := 0
 	log.Printf("[getMessageProcessor] Message processor initialized, ID = %v", currentId)
