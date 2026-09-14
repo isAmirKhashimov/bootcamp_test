@@ -8,6 +8,7 @@ package main
 import (
 	"cmp"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -19,16 +20,101 @@ import (
 )
 
 // List I used before cannot be simply serialized as complex structure, so I decided to proceed with slices and simple reverse
-var (
-	messages       []Message
-	messagesMu     sync.Mutex
-	processMessage = getMessageProceessor()
-)
+var messageProcessor IMessageProcessor = &MessageProcessor{}
 
 type Message struct {
 	Id        int    `json:"id"`
 	Content   string `json:"message"`
 	CreatedAt string `json:"created_at"`
+}
+
+type IMessageProcessor interface {
+	TryDeleteMessageById(id int) bool
+	GetMessagesReverse() []Message
+	AddMessage(messageText string) (Message, error)
+}
+
+type MessageProcessor struct {
+	messages   []Message
+	messagesMu sync.Mutex
+	currentId  int
+}
+
+func (messageProcessor *MessageProcessor) TryDeleteMessageById(id int) bool {
+	messageProcessor.messagesMu.Lock()
+	defer messageProcessor.messagesMu.Unlock()
+
+	printLog := getLogger("MessageProcessor.TryDeleteMessageById")
+	printLog("Message deletion started")
+	defer printLog("Message deletion completed")
+
+	targetIdx, found := slices.BinarySearchFunc(messageProcessor.messages, id, func(msg Message, targetId int) int {
+		return cmp.Compare(msg.Id, targetId)
+	})
+
+	if !found {
+		printLog("Message was not found")
+		return false
+	}
+
+	// Here it'd be better to have map or lazy deletion instead of slice.
+	printLog("Message was found by index" + strconv.Itoa(targetIdx))
+	copy(messageProcessor.messages[targetIdx:], messageProcessor.messages[targetIdx+1:])
+	messageProcessor.messages = messageProcessor.messages[:len(messageProcessor.messages)-1]
+
+	return true
+}
+
+func (messageProcessor *MessageProcessor) GetMessagesReverse() []Message {
+	messageProcessor.messagesMu.Lock()
+	defer messageProcessor.messagesMu.Unlock()
+
+	printLog := getLogger("MessageProcessor.GetMessagesReverse")
+	printLog("Messages reversing started")
+	defer printLog("Messages reversing completed")
+
+	n := len(messageProcessor.messages)
+	if n == 0 {
+		return make([]Message, 0)
+	}
+
+	result := make([]Message, n)
+
+	for i, msg := range messageProcessor.messages {
+		result[n-1-i] = msg
+	}
+
+	return result
+}
+
+func (messageProcessor *MessageProcessor) AddMessage(messageText string) (Message, error) {
+	messageProcessor.messagesMu.Lock()
+	defer messageProcessor.messagesMu.Unlock()
+
+	messageProcessor.currentId++
+
+	printLog := getLogger("MessageProcessor.AddMessage")
+	printLog("Messages reversing started")
+	printLog("Message processing started, ID = " + strconv.Itoa(messageProcessor.currentId))
+	defer printLog("Message processing completed, ID = " + strconv.Itoa(messageProcessor.currentId))
+
+	now := time.Now().UTC()
+	formattedTime := now.Format(time.RFC3339)
+	message := Message{
+		Id:        messageProcessor.currentId,
+		Content:   messageText,
+		CreatedAt: formattedTime,
+	}
+
+	messageProcessor.messages = append(messageProcessor.messages, message)
+
+	return message, nil
+}
+
+func getLogger(header string) func(string) {
+	return func(messageText string) {
+		log.Printf("[%v]: %v", header, messageText)
+	}
 }
 
 func main() {
@@ -59,22 +145,27 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
+// Step 1: GET /health
 func checkHealth(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[GET /health] Health check started")
-	defer log.Printf("[GET /health] Health check completed")
+
+	printLog := getLogger("GET /health")
+	printLog("Health check started")
+	defer printLog("Health check completed")
 
 	w.Write([]byte("ok"))
 }
 
+// Step 2, 3: POST /echo
 func echoMessage(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[POST /echo] Echoing message started")
-	defer log.Printf("[POST /echo] Echoing message completed")
+	printLog := getLogger("POST /echo")
+	printLog("Echoing message started")
+	defer printLog("Echoing message completed")
 
 	defer r.Body.Close()
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("[POST /echo] Failed to load the request body. Return 500")
+		printLog("Failed to load the request body. Return 500")
 		http.Error(w, "Failed to load the request body", http.StatusInternalServerError)
 		return
 	}
@@ -83,24 +174,26 @@ func echoMessage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 
 	if contentType == "application/json" && !json.Valid(bodyBytes) {
-		log.Printf("[POST /echo] Request content is not valid. Return 400")
+		printLog("Request content is not valid. Return 400")
 		http.Error(w, "Request content is not valid", http.StatusBadRequest)
 		return
 	} else {
-		log.Printf("[POST /echo] Successfully read request body: \"%v\". Return 200", string(bodyBytes))
+		printLog("Successfully read request body: \"" + string(bodyBytes) + "\". Return 200")
 		w.WriteHeader(http.StatusOK)
 		w.Write(bodyBytes)
 	}
 }
 
+// Step 4: POST /messages
 func sendMessage(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[POST /messages] Sending message started")
-	defer log.Printf("[POST /messages] Sending message completed")
+	printLog := getLogger("POST /messages")
+	printLog("Sending message started")
+	defer printLog("Sending message completed")
 
 	var data map[string]string
 
 	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-		log.Printf("[POST /messages] Request content is not valid. Return 400")
+		printLog("Request content is not valid. Return 400")
 		http.Error(w, "Request content is not valid", http.StatusBadRequest)
 		return
 	}
@@ -109,140 +202,72 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	requestMessage, exists := data["message"]
 	if !exists || requestMessage == "" {
-		log.Printf("[POST /messages] 'message' should not be empty. Return 400")
+		printLog("'message' should not be empty. Return 400")
 		http.Error(w, "'message' should not be empty", http.StatusBadRequest)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	responseMessage, err := processMessage(requestMessage)
+	responseMessage, err := messageProcessor.AddMessage(requestMessage)
 
 	if err != nil {
-		log.Printf("[POST /messages] Cannot process message: %v. Return 500", err.Error())
+		printLog("Cannot process message: " + err.Error() + ". Return 500")
 		http.Error(w, "Cannot process message: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[POST /messages] Message processed successully: \"%v\". Return 201", responseMessage)
+	printLog("Message processed successully: \"" + fmt.Sprintf("%#v", responseMessage) + "\". Return 201")
 	w.WriteHeader(http.StatusCreated)
 
 	if err := json.NewEncoder(w).Encode(responseMessage); err != nil {
-		log.Printf("[POST /messages] Cannot serialize message: %v. Return 500", err.Error())
+		printLog("Cannot serialize message: " + err.Error() + ". Return 500")
 		http.Error(w, "Cannot serialize message: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 }
 
+// Step 5: GET /messages
 func getMessages(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[GET /messages] Getting messages started")
-	defer log.Printf("[GET /messages] Getting messages completed")
+	printLog := getLogger("GET /messages")
+	printLog("Getting message started")
+	defer printLog("Getting message completed")
 
 	w.Header().Set("Content-Type", "application/json")
 
-	if err := json.NewEncoder(w).Encode(getMessagesReverse()); err != nil {
-		log.Printf("[GET /messages] Cannot serialize message: %v. Return 500", err.Error())
+	messages := messageProcessor.GetMessagesReverse()
+	if err := json.NewEncoder(w).Encode(&messages); err != nil {
+		printLog("Cannot serialize message: " + err.Error() + ". Return 500")
 		http.Error(w, "Cannot serialize message: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[GET /messages] Successfully serialized messages. Messages count: %v", len(messages))
+	printLog("Successfully serialized messages. Messages count: " + strconv.Itoa(len(messages)))
 }
 
+// Step 6: DELETE /messages/{id}
 func deleteMessage(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 
-	log.Printf("[DELETE /messages/%v] Getting messages started", idStr)
-	defer log.Printf("[GET /messages/%v] Getting messages completed", idStr)
+	printLog := getLogger("DELETE /messages/" + idStr)
+	printLog("Deleting messages started")
+	defer printLog("Getting messages completed")
 
 	w.Header().Set("Content-Type", "application/json")
 
 	num, err := strconv.Atoi(idStr)
 	if err != nil {
-		log.Printf("[DELETE /messages/%v] Cannot convert id = %v to integer. Return 500", err.Error())
+		printLog("Cannot convert id = " + err.Error() + " to integer. Return 500")
 		http.Error(w, "Cannot convert id = \""+idStr+"\" to integer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if !tryDeleteMessageById(num) {
-		log.Printf("[DELETE /messages/%v] Target message does not exist. Return 404", idStr)
-		http.Error(w, "[DELETE /messages/"+idStr+"] Target message does not exist", http.StatusNotFound)
+	if !messageProcessor.TryDeleteMessageById(num) {
+		printLog("Target message does not exist. Return 404")
+		http.Error(w, "Target message does not exist", http.StatusNotFound)
 		return
 	}
 
-	log.Printf("[DELETE /messages/%v] Message deleted successully. Return 204", idStr)
+	printLog("Message deleted successully. Return 204")
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func tryDeleteMessageById(id int) bool {
-	messagesMu.Lock()
-	defer messagesMu.Unlock()
-
-	log.Printf("[tryDeleteMessageById] Message deletion started")
-	defer log.Printf("[tryDeleteMessageById] Message deletion completed")
-
-	targetIdx, found := slices.BinarySearchFunc(messages, id, func(msg Message, targetId int) int {
-		return cmp.Compare(msg.Id, targetId)
-	})
-
-	if !found {
-		log.Printf("[tryDeleteMessageById] Message was not found")
-		return false
-	}
-
-	// Here it'd be better to have map or lazy deletion instead of slice.
-	log.Printf("[tryDeleteMessageById] Message was found by index %v", targetIdx)
-	copy(messages[targetIdx:], messages[targetIdx+1:])
-	messages = messages[:len(messages)-1]
-
-	return true
-}
-
-func getMessagesReverse() []Message {
-	messagesMu.Lock()
-	defer messagesMu.Unlock()
-
-	log.Printf("[getMessagesReverse] Message processing started")
-	defer log.Printf("[getMessagesReverse] Message processing completed")
-
-	n := len(messages)
-	if n == 0 {
-		return make([]Message, 0)
-	}
-
-	result := make([]Message, n)
-
-	for i, msg := range messages {
-		result[n-1-i] = msg
-	}
-
-	return result
-}
-
-// TODO: To transform into interface with methods
-func getMessageProceessor() func(string) (Message, error) {
-	currentId := 0
-	log.Printf("[getMessageProcessor] Message processor initialized, ID = %v", currentId)
-
-	return func(messageText string) (Message, error) {
-		messagesMu.Lock()
-		defer messagesMu.Unlock()
-
-		currentId++
-
-		log.Printf("[getMessageProcessor] Message processing started, ID = %v", currentId)
-		defer log.Printf("[getMessageProcessor] Message processing completed")
-
-		now := time.Now().UTC()
-		formattedTime := now.Format(time.RFC3339)
-		message := Message{
-			Id:        currentId,
-			Content:   messageText,
-			CreatedAt: formattedTime,
-		}
-
-		messages = append(messages, message)
-
-		return message, nil
-	}
 }
